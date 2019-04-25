@@ -1,0 +1,12 @@
+---
+- name: restart php-fpm
+  service:
+    name: php-fpm
+    state: restarted
+  register: php-fpm_restart
+
+- name: reload nginx
+  service:
+    name: nginx
+    state: reloaded
+  register: nginx_reload

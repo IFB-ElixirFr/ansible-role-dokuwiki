@@ -1,0 +1,262 @@
+# Install NGINX and php support
+- name: Install Webmatic yum repository
+  yum:
+    name: https://mirror.webtatic.com/yum/el7/webtatic-release.rpm
+    state: present
+
+- name: Install Dokuwiki dependencies.
+  package: name={{ item }} state=present
+  with_items:
+    - unzip
+    - nginx
+    - php56w
+    - php56w-fpm
+    - php56w-ldap
+
+- name: Disable PHP fix pathinfo option
+  lineinfile:
+    path: /etc/php.ini
+    regexp: '^;cgi.fix_pathinfo=1'
+    line: 'cgi.fix_pathinfo=0'
+    backrefs: yes
+  notify: restart php-fpm
+
+- name: Change php-fpm config to listen on socket
+  lineinfile:
+    path: /etc/php-fpm.d/www.conf
+    regexp: '^listen ='
+    line: 'listen = /var/run/php-fpm/php-fpm.sock'
+    backrefs: yes
+  notify: restart php-fpm
+- name: Change php-fpm socket owner
+  lineinfile:
+    path: /etc/php-fpm.d/www.conf
+    regexp: '^;listen.owner ='
+    line: 'listen.owner = nginx'
+    backrefs: yes
+  notify: restart php-fpm
+- name: Change php-fpm socket group
+  lineinfile:
+    path: /etc/php-fpm.d/www.conf
+    regexp: '^;listen.group ='
+    line: 'listen.group = nginx'
+    backrefs: yes
+  notify: restart php-fpm
+- name: Change php-fpm user to nginx
+  lineinfile:
+    path: /etc/php-fpm.d/www.conf
+    regexp: '^user = '
+    line: 'user = nginx'
+    backrefs: yes
+  notify: restart php-fpm
+- name: Change php-fpm group to nginx
+  lineinfile:
+    path: /etc/php-fpm.d/www.conf
+    regexp: '^group = '
+    line: 'group = nginx'
+    backrefs: yes
+  notify: restart php-fpm
+- name: Change group on session dir
+  file:
+    path: /var/lib/php/session
+    group: nginx
+
+- name: Enable php-fpm service
+  service:
+    name: php-fpm
+    enabled: yes
+
+### /!\ Manage by openldap role
+#- name: Disable certificate check for openldap
+#  lineinfile:
+#    path: /etc/openldap/ldap.conf
+#    line: 'TLS_REQCERT never'
+#  notify: restart php-fpm
+
+# Install Dokuwiki
+- name: Download latest stable version
+  get_url:
+    url: http://download.dokuwiki.org/src/dokuwiki/dokuwiki-stable.tgz
+    dest: /srv/dokuwiki-stable.tgz
+  register: dokuwiki_download
+- name: Unpack dokuwiki latest stable version
+  unarchive:
+    src: /srv/dokuwiki-stable.tgz
+    dest: /srv/
+    remote_src: yes
+  when: dokuwiki_download.changed
+- name: Retrieve the latest version directory
+  find:
+    paths: /srv
+    patterns: 'dokuwiki-*'
+    age: -1m
+    age_stamp: ctime
+    file_type: directory
+  register: dokuwiki_dirs
+- name: Create a symbolink link to latest stable version
+  file:
+    src: '{{ dokuwiki_dirs.files[0].path }}'
+    dest: /srv/dokuwiki
+    state: link
+  when: (dokuwiki_dirs.matched > 0)
+- name: Set rights on dokuwiki files
+  file:
+    path: '{{ dokuwiki_dirs.files[0].path }}'
+    state: directory
+    owner: nginx
+    group: nginx
+    recurse: yes
+  when: (dokuwiki_dirs.matched > 0)
+- name: Create dokuwiki data dir
+  file:
+    path: /srv/dokuwiki_data/{{ item }}
+    state: directory
+    owner: nginx
+    group: nginx
+    mode: 0700
+    recurse: yes
+  with_items:
+    - pages
+    - attic
+    - media
+    - media_attic
+    - meta
+    - media_meta
+    - cache
+    - index
+    - locks
+    - tmp
+
+
+- name: Download latest version of plugins
+  get_url:
+    url: "{{ item.src }}"
+    dest: "/srv/dokuwiki/lib/plugins/{% if item.src | regex_search('zip$') %}{{ item.name }}.zip{% else %}{{ item.name }}.tar.gz{% endif %}"
+  register: dokuwiki_plugins_download
+  with_items: "{{ dokuwiki_plugins| default([]) }}"
+
+#- debug: var=dokuwiki_plugins
+#- debug: var=dokuwiki_plugins_download
+
+- name: Remove (previous versions of) plugins
+  file:
+    path: "/srv/dokuwiki/lib/plugins/{{ item.item.name }}"
+    state: absent
+  when: item.changed
+  with_items: "{{ dokuwiki_plugins_download.results | default([]) }}"
+
+- name: Remove plugins
+  file:
+    path: "/srv/dokuwiki/lib/plugins/{{ item.name }}"
+    state: absent
+  with_flattened:
+    - "{{ dokuwiki_plugins_remove|default([]) }}"
+
+- name: Create directory for each plugin (unarchive need directory exist)
+  file:
+    path: "/srv/dokuwiki/lib/plugins/{{ item.name }}"
+    state: directory
+    group: nginx
+    owner: nginx
+  with_items: "{{ dokuwiki_plugins|default([]) }}"
+
+- name: Unarchive and Install plugins
+  unarchive:
+    src: "{{ item.dest }}"
+    dest: "/srv/dokuwiki/lib/plugins/{% if item.dest | regex_search('zip$') %}{% else %}{{ item.item.name }}{% endif %}"
+    extra_opts: "{% if item.dest | regex_search('zip$') %}{{ [] }}{% else %}{{ ['--strip-components=1'] }}{% endif %}"
+    group: nginx
+    owner: nginx
+    mode: "0770"
+    remote_src: true
+  when: item.changed and not ansible_check_mode
+  with_items: "{{ dokuwiki_plugins_download.results | default([]) }}"
+
+
+- name: Download latest version of templates
+  get_url:
+    url: "{{ item.src }}"
+    dest: "/srv/dokuwiki/lib/tpl/{{ item.name }}.tar.gz"
+  register: dokuwiki_templates_download
+  with_items: "{{ dokuwiki_templates|default([]) }}"
+
+#- debug: var=dokuwiki_templates
+#- debug: var=dokuwiki_templates_download
+
+- name: Remove previous versions of templates
+  file:
+    path: "/srv/dokuwiki/lib/tpl/{{ item.item.name }}"
+    state: absent
+  when: item.changed 
+  with_items: "{{ dokuwiki_templates_download.results|default([]) }}"
+
+- name: Create directory for each template (unarchive need directory)
+  file:
+    path: "/srv/dokuwiki/lib/tpl/{{ item.name }}"
+    state: directory
+    group: nginx
+    owner: nginx
+  with_items: "{{ dokuwiki_templates|default([]) }}"
+
+- name: Unarchive and and install latest version of templates
+  unarchive:
+    src: "{{ item.dest }}"
+    dest: "/srv/dokuwiki/lib/tpl/{{ item.item.name }}"
+    remote_src: true
+    extra_opts: ['--strip-components=1']
+    group: nginx
+    owner: nginx
+    mode: "0770"
+  when: item.changed
+  with_items: "{{ dokuwiki_templates_download.results|default([]) }}"
+
+
+# - name: Check if Dokuwiki acl configuration file already exists.
+#   stat: path=/srv/dokuwiki/conf/acl.auth.php
+#   register: dokuwiki_acl_config_file
+- name: Install dokuwiki default acl config
+  template:
+    src: acl.auth.php
+    dest: /srv/dokuwiki/conf/acl.auth.php
+    owner: nginx
+    group: nginx
+  # when: (dokuwiki_acl_config_file.stat.exists == false)
+
+# - name: Check if Dokuwiki local configuration file already exists.
+#   stat: path=/srv/dokuwiki/conf/local.php
+#   register: dokuwiki_local_config_file
+- name: Install dokuwiki default local config
+  template:
+    src: local.php
+    dest: /srv/dokuwiki/conf/local.php
+    owner: nginx
+    group: nginx
+  # when: (dokuwiki_local_config_file.stat.exists == false)
+
+# - name: Check if Dokuwiki local plugin configuration file already exists.
+#   stat: path=/srv/dokuwiki/conf/plugins.local.php
+#   register: dokuwiki_local_plugin_config_file
+- name: Install dokuwiki default local plugin config
+  template:
+    src: plugins.local.php
+    dest: /srv/dokuwiki/conf/plugins.local.php
+    owner: nginx
+    group: nginx
+  # when: (dokuwiki_local_plugin_config_file.stat.exists == false)
+
+# - name: Check if Dokuwiki users configuration file already exists.
+#   stat: path=/srv/dokuwiki/conf/users.auth.php
+#   register: dokuwiki_users_config_file
+- name: Install dokuwiki default users config
+  template:
+    src: users.auth.php
+    dest: /srv/dokuwiki/conf/users.auth.php
+    owner: nginx
+    group: nginx
+  # when: (dokuwiki_users_config_file.stat.exists == false)
+
+- name: Install dokuwiki nginx config
+  template:
+    src: nginx.conf
+    dest: /etc/nginx/nginx.conf
+  notify: reload nginx
